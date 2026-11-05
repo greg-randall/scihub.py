@@ -90,3 +90,6 @@ ENV/
 # IDE 
 .vscode/
 .idea/
+# local virtualenv and test output
+.venv/
+data/

@@ -1,36 +1,42 @@
-scihub.py
-[![Python](https://img.shields.io/badge/Python-3%2B-blue.svg)](https://www.python.org)
-=========
+# scihub.py
 
-scihub.py is an unofficial API for Sci-hub. scihub.py can search for papers on Google Scholars and download papers from Sci-hub. It can be imported independently or used from the command-line.
+[![Python](https://img.shields.io/badge/Python-3%2B-blue.svg)](https://www.python.org)
+
+scihub.py is an unofficial API for Sci-Hub. It can search for papers on Google Scholar and download papers from Sci-Hub. It can be imported as a library or used from the command line.
 
 If you believe in open access to scientific papers, please donate to Sci-Hub.
 
-Features
---------
-* Download specific articles directly or via Sci-hub
-* Download a collection of articles by passing in file of article identifiers
-* Search for articles on Google Scholars and download them
+## Features
 
-**Note**: A known limitation of scihub.py is that captchas show up every now and then, blocking any searches or downloads.
+* Download specific articles directly or via Sci-Hub
+* Download a collection of articles by passing in a file of article identifiers
+* Search for articles on Google Scholar and download them
 
-Setup
------
+**Note**: captchas show up every now and then, blocking searches or downloads. This is a known limitation.
+
+**Note**: creating a `SciHub()` object makes a network request to `https://sci-hub.now.sh/` to find working Sci-Hub mirrors. If that request fails or returns no mirrors, `SciHub()` raises an exception. The command-line tool creates this object before parsing arguments, so even `--help` needs network access.
+
+## Setup
+
 ```
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
-Usage
-------
-You can interact with scihub.py from the commandline:
+## Command-line usage
+
+Run the script from the repository root:
+
+```
+python3 scihub/scihub.py -d <DOI|PMID|URL> -o papers
+```
 
 ```
 usage: scihub.py [-h] [-d (DOI|PMID|URL)] [-f path] [-s query] [-sd query]
-                 [-l N] [-o path] [-v]
+                 [-l N] [-o path] [-v] [-p PROXY]
 
 SciHub - To remove all barriers in the way of science.
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   -d (DOI|PMID|URL), --download (DOI|PMID|URL)
                         tries to find and download the paper
@@ -43,64 +49,80 @@ optional arguments:
   -o path, --output path
                         directory to store papers
   -v, --verbose         increase output verbosity
-  -p, --proxy           set proxy
+  -p PROXY, --proxy PROXY
+                        via proxy format like socks5://user:pass@host:port
 ```
 
-You can also import scihub. The following examples below demonstrate all the features.
+* `-f` expects a text file with one identifier (DOI, PMID or URL) per line.
+* `-o` defaults to the current directory.
+* `-p` accepts `http://`, `https://` or `socks5://` proxy URLs (SOCKS support comes from `pysocks`).
+* `-v` currently has no effect: logging is already set to debug level by default.
+
+## Library usage
+
+Run Python from the repository root (or put the repository root on `PYTHONPATH`) so that the `scihub` package can be imported. The examples below demonstrate all the features.
 
 ### fetch
 
-```
+```python
 from scihub import SciHub
 
 sh = SciHub()
 
-# fetch specific article (don't download to disk)
-# this will return a dictionary in the form 
-# {'pdf': PDF_DATA,
-#  'url': SOURCE_URL,
-#  'name': UNIQUE_GENERATED NAME
-# }
+# fetch a specific article without saving it to disk
 result = sh.fetch('http://ieeexplore.ieee.org/xpl/login.jsp?tp=&arnumber=1648853')
 ```
 
+On success, `fetch` returns a dictionary:
+
+```python
+{
+    'pdf': PDF_DATA,      # bytes
+    'url': SOURCE_URL,
+    'name': UNIQUE_GENERATED_NAME
+}
+```
+
+Other outcomes:
+
+* If the response is not a PDF (usually a captcha), `fetch` switches to the next Sci-Hub mirror and raises `CaptchaNeedException`.
+* On a connection error, it switches to the next mirror and returns `None`.
+* On any other request error, it returns `{'err': ERROR_MESSAGE}`.
+* When there are no mirrors left, it raises `Exception('Ran out of valid sci-hub urls')`.
+
 ### download
 
-```
+```python
 from scihub import SciHub
 
 sh = SciHub()
 
-# exactly the same thing as fetch except downloads the articles to disk
-# if no path given, a unique name will be used as the file name
-result = sh.download('http://ieeexplore.ieee.org/xpl/login.jsp?tp=&arnumber=1648853', path='paper.pdf')
+# same as fetch, but saves the PDF to disk.
+# destination is the directory (default: current directory);
+# path is the file name (default: the generated unique name)
+result = sh.download('http://ieeexplore.ieee.org/xpl/login.jsp?tp=&arnumber=1648853',
+                     destination='papers', path='paper.pdf')
 ```
+
+`download` retries up to 10 times when `fetch` fails, moving to the next mirror each time. If every attempt fails, the last exception is raised. It returns the same dictionary as `fetch`.
 
 ### search
 
-```
+```python
 from scihub import SciHub
 
 sh = SciHub()
 
-# retrieve 5 articles on Google Scholars related to 'bittorrent'
+# retrieve 5 articles on Google Scholar related to 'bittorrent'
 results = sh.search('bittorrent', 5)
 
-# download the papers; will use sci-hub.io if it must
+# download the papers, going through Sci-Hub when needed
 for paper in results['papers']:
-	sh.download(paper['url'])
-
+    sh.download(paper['url'])
 ```
-License
--------
+
+`search` returns `{'papers': [{'name': ..., 'url': ...}, ...]}`. If the search fails (connection error or captcha), the dictionary also contains an `'err'` key.
+
+## License
+
 MIT
-
-
-
-
-
-
-
-
-
-
