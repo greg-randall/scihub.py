@@ -17,9 +17,10 @@ from urllib.parse import unquote, urldefrag, urlsplit
 
 logger = logging.getLogger('Sci-Hub')
 
-# From the robot-check page: <altcha-widget ...> and <div class="answer" onclick="check()">No</div>
-CHALLENGE_SELECTOR = 'altcha-widget'
+# From the robot-check page: <div class="answer" onclick="check()">No</div>.
+# Don't detect it by <altcha-widget>: the paper page has one of those too.
 ANSWER_SELECTOR = '.question .answer'
+CHALLENGE_SELECTOR = ANSWER_SELECTOR
 
 # Every attribute on the page that looks like a link to a PDF, resolved to an absolute URL.
 FIND_PDF_LINKS_JS = """() => {
