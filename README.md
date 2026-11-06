@@ -65,10 +65,11 @@ options:
                         (default: data/debug)
 ```
 
-* `-f` expects a text file with one identifier (DOI, PMID or URL) per line.
+* `-f` expects a text file with one identifier (DOI, PMID or URL) per line; blank lines are skipped. A failed identifier doesn't stop the batch: it's logged, the batch carries on, and a summary of failures is printed at the end.
 * `-o` defaults to the current directory.
 * `-p` accepts `http://`, `https://` or `socks5://` proxy URLs and applies to both `requests` and the browser. SOCKS support in `requests` comes from `pysocks`; the browser (Playwright) doesn't support SOCKS proxies with a username and password.
-* When a download fails, the page HTML is saved to `--debug-dir` so you can see what Sci-Hub actually returned.
+* When a download fails for an unexpected reason (robot check not passed, no PDF link on the page), the page HTML is saved to `--debug-dir` so you can see what Sci-Hub actually returned.
+* The exit status is 0 when everything succeeded and 1 when anything failed, including a DOI Sci-Hub doesn't have.
 * `-v` currently has no effect: logging is already set to debug level by default.
 
 ## Library usage
@@ -109,6 +110,7 @@ Other outcomes:
 
 * If the robot check is still showing after 3 clicks, `fetch` switches to the next mirror (if there is one) and raises `CaptchaNeedException`.
 * If the browser fails to load the page (mirror unreachable, timeout), it switches to the next mirror (if there is one) and re-raises the browser error.
+* If Sci-Hub has no article for the identifier, it returns `{'err': 'Sci-Hub has no article for identifier ...'}`.
 * If the paper page has no PDF link, or none of the links return a PDF, it returns `{'err': ERROR_MESSAGE}`.
 * For a direct `.pdf` URL, a request error or a non-PDF response returns `{'err': ERROR_MESSAGE}`.
 

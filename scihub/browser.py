@@ -22,6 +22,9 @@ logger = logging.getLogger('Sci-Hub')
 ANSWER_SELECTOR = '.question .answer'
 CHALLENGE_SELECTOR = ANSWER_SELECTOR
 
+# From the "no articles found" page: <... translate="en:notfound">I do not have any papers matching your request :(</...>
+NOT_FOUND_SELECTOR = '[translate="en:notfound"]'
+
 # Every attribute on the page that looks like a link to a PDF, resolved to an absolute URL.
 FIND_PDF_LINKS_JS = """() => {
     const out = [];
@@ -42,6 +45,11 @@ class CaptchaNeedException(Exception):
 
 
 class BrowserFetchError(Exception):
+    pass
+
+
+class ArticleNotFoundError(BrowserFetchError):
+    """Sci-Hub says it has no article for the identifier."""
     pass
 
 
@@ -157,6 +165,9 @@ class BrowserFetcher(object):
             logger.info('Loaded "%s" in %.1fs', page.title(), time.time() - started)
 
             self._pass_robot_check(page)
+
+            if page.query_selector(NOT_FOUND_SELECTOR) is not None:
+                raise ArticleNotFoundError('Sci-Hub has no article for %s' % page.url)
 
             candidates = []
             for url in pdf_responses + page.evaluate(FIND_PDF_LINKS_JS):

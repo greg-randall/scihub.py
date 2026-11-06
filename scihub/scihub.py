@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import logging
 import os
+import sys
 
 import requests
 import urllib3
@@ -19,9 +20,9 @@ from bs4 import BeautifulSoup
 from retrying import retry
 
 try:
-    from .browser import BrowserFetcher, BrowserFetchError, CaptchaNeedException
+    from .browser import ArticleNotFoundError, BrowserFetcher, BrowserFetchError, CaptchaNeedException
 except ImportError:  # run as a script: python3 scihub/scihub.py
-    from browser import BrowserFetcher, BrowserFetchError, CaptchaNeedException
+    from browser import ArticleNotFoundError, BrowserFetcher, BrowserFetchError, CaptchaNeedException
 
 # log config
 logging.basicConfig()
@@ -168,8 +169,9 @@ class SciHub(object):
             logger.info('Failed to fetch pdf with identifier %s (page %s) due to captcha' % (identifier, page_url))
             self._try_next_mirror()
             raise
+        except ArticleNotFoundError:
+            return {'err': 'Sci-Hub has no article for identifier %s' % identifier}
         except BrowserFetchError as e:
-            logger.info('Failed to fetch pdf with identifier %s: %s' % (identifier, e))
             return {'err': 'Failed to fetch pdf with identifier %s: %s' % (identifier, e)}
         except Exception as e:  # browser/navigation errors, e.g. mirror unreachable
             logger.info('Browser error on %s (%s: %s)' % (page_url, type(e).__name__, e))
@@ -277,45 +279,58 @@ def main():
 
     with SciHub(base_urls=args.mirror, proxy=args.proxy, headless=not args.show_browser,
                 debug_dir=args.debug_dir) as sh:
-        run(sh, args)
+        failures = run(sh, args)
+
+    sys.exit(1 if failures else 0)
+
+
+def _download_many(sh, identifiers, output):
+    """Download each identifier, carrying on past failures. Returns the number that failed."""
+    failed = []
+    for i, identifier in enumerate(identifiers, 1):
+        logger.info('[%d/%d] %s', i, len(identifiers), identifier)
+        try:
+            result = sh.download(identifier, output)
+        except Exception as e:
+            result = {'err': 'Failed to fetch pdf with identifier %s (%s: %s)' % (identifier, type(e).__name__, e)}
+        if 'err' in result:
+            logger.error('%s', result['err'])
+            failed.append(identifier)
+        else:
+            logger.debug('Successfully downloaded file with identifier %s', identifier)
+    logger.info('Downloaded %d of %d; %d failed', len(identifiers) - len(failed), len(identifiers), len(failed))
+    for identifier in failed:
+        logger.info('  failed: %s', identifier)
+    return len(failed)
 
 
 def run(sh, args):
+    """Run the requested command. Returns the number of failures (0 means success)."""
     if args.download:
         result = sh.download(args.download, args.output)
         if 'err' in result:
-            logger.debug('%s', result['err'])
-        else:
-            logger.debug('Successfully downloaded file with identifier %s', args.download)
+            logger.error('%s', result['err'])
+            return 1
+        logger.debug('Successfully downloaded file with identifier %s', args.download)
     elif args.search:
         results = sh.search(args.search, args.limit)
-        if 'err' in results:
-            logger.debug('%s', results['err'])
-        else:
-            logger.debug('Successfully completed search with query %s', args.search)
         print(results)
+        if 'err' in results:
+            logger.error('%s', results['err'])
+            return 1
+        logger.debug('Successfully completed search with query %s', args.search)
     elif args.search_download:
         results = sh.search(args.search_download, args.limit)
         if 'err' in results:
-            logger.debug('%s', results['err'])
-        else:
-            logger.debug('Successfully completed search with query %s', args.search_download)
-            for paper in results['papers']:
-                result = sh.download(paper['url'], args.output)
-                if 'err' in result:
-                    logger.debug('%s', result['err'])
-                else:
-                    logger.debug('Successfully downloaded file with identifier %s', paper['url'])
+            logger.error('%s', results['err'])
+            return 1
+        logger.debug('Successfully completed search with query %s', args.search_download)
+        return _download_many(sh, [paper['url'] for paper in results['papers']], args.output)
     elif args.file:
         with open(args.file, 'r') as f:
-            identifiers = f.read().splitlines()
-            for i, identifier in enumerate(identifiers, 1):
-                logger.info('[%d/%d] %s', i, len(identifiers), identifier)
-                result = sh.download(identifier, args.output)
-                if 'err' in result:
-                    logger.debug('%s', result['err'])
-                else:
-                    logger.debug('Successfully downloaded file with identifier %s', identifier)
+            identifiers = [line.strip() for line in f if line.strip()]
+        return _download_many(sh, identifiers, args.output)
+    return 0
 
 
 if __name__ == '__main__':
