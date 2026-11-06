@@ -14,7 +14,9 @@ If you believe in open access to scientific papers, please donate to Sci-Hub.
 
 **Note**: captchas show up every now and then, blocking searches or downloads. This is a known limitation.
 
-**Note**: creating a `SciHub()` object makes a network request to `https://sci-hub.now.sh/` to find working Sci-Hub mirrors. If that request fails or returns no mirrors, `SciHub()` raises an exception. The command-line tool creates this object before parsing arguments, so even `--help` needs network access.
+**How Sci-Hub pages are loaded**: Sci-Hub shows an "Are you a robot?" page (an ALTCHA proof-of-work check) before the paper. scihub.py loads Sci-Hub pages in a [Camoufox](https://camoufox.com/) browser, clicks through that check, finds the PDF link on the paper page and downloads it with the browser's cookies. The browser starts on the first Sci-Hub fetch and is reused after that. Direct links to `.pdf` files are downloaded with `requests` and don't start the browser.
+
+**Mirrors**: the default mirror is `https://sci-hub.ru`. Pass others with `-m` on the command line or `base_urls=[...]` in Python; they're tried in order when one fails.
 
 ## Setup
 
@@ -22,17 +24,22 @@ If you believe in open access to scientific papers, please donate to Sci-Hub.
 python3 -m pip install -r requirements.txt
 ```
 
+The first run downloads the Camoufox browser (2.4 GB on disk for v158.0.1-beta.41, into `~/.cache/camoufox`). To do that ahead of time, run `python3 -m camoufox fetch`.
+
 ## Command-line usage
 
-Run the script from the repository root:
+Run it as a module from the repository root:
 
 ```
-python3 scihub/scihub.py -d <DOI|PMID|URL> -o papers
+python3 -m scihub -d <DOI|PMID|URL> -o papers
 ```
 
+Quote DOIs that contain parentheses, e.g. `-d '10.1016/0266-1144(89)90022-8'`.
+
 ```
-usage: scihub.py [-h] [-d (DOI|PMID|URL)] [-f path] [-s query] [-sd query]
-                 [-l N] [-o path] [-v] [-p PROXY]
+usage: scihub [-h] [-d (DOI|PMID|URL)] [-f path] [-s query] [-sd query]
+              [-l N] [-o path] [-v] [-p PROXY] [-m URL] [--show-browser]
+              [--debug-dir path]
 
 SciHub - To remove all barriers in the way of science.
 
@@ -51,16 +58,31 @@ options:
   -v, --verbose         increase output verbosity
   -p PROXY, --proxy PROXY
                         via proxy format like socks5://user:pass@host:port
+  -m URL, --mirror URL  sci-hub mirror to use; repeat to give fallbacks
+                        (default: https://sci-hub.ru)
+  --show-browser        show the browser window instead of running headless
+  --debug-dir path      where to save page HTML when a download fails
+                        (default: data/debug)
 ```
 
 * `-f` expects a text file with one identifier (DOI, PMID or URL) per line.
 * `-o` defaults to the current directory.
-* `-p` accepts `http://`, `https://` or `socks5://` proxy URLs (SOCKS support comes from `pysocks`).
+* `-p` accepts `http://`, `https://` or `socks5://` proxy URLs and applies to both `requests` and the browser. SOCKS support in `requests` comes from `pysocks`; the browser (Playwright) doesn't support SOCKS proxies with a username and password.
+* When a download fails, the page HTML is saved to `--debug-dir` so you can see what Sci-Hub actually returned.
 * `-v` currently has no effect: logging is already set to debug level by default.
 
 ## Library usage
 
 Run Python from the repository root (or put the repository root on `PYTHONPATH`) so that the `scihub` package can be imported. The examples below demonstrate all the features.
+
+`SciHub` takes optional `base_urls` (list of mirrors), `proxy`, `headless` (default `True`) and `debug_dir` (default `None`, meaning page HTML isn't saved on failure). Use it as a context manager, or call `sh.close()` when done, so the browser shuts down:
+
+```python
+from scihub import SciHub
+
+with SciHub(base_urls=['https://sci-hub.ru'], debug_dir='data/debug') as sh:
+    sh.download('10.1016/0266-1144(89)90022-8', destination='papers')
+```
 
 ### fetch
 
@@ -85,10 +107,10 @@ On success, `fetch` returns a dictionary:
 
 Other outcomes:
 
-* If the response is not a PDF (usually a captcha), `fetch` switches to the next Sci-Hub mirror and raises `CaptchaNeedException`.
-* On a connection error, it switches to the next mirror and returns `None`.
-* On any other request error, it returns `{'err': ERROR_MESSAGE}`.
-* When there are no mirrors left, it raises `Exception('Ran out of valid sci-hub urls')`.
+* If the robot check is still showing after 3 clicks, `fetch` switches to the next mirror (if there is one) and raises `CaptchaNeedException`.
+* If the browser fails to load the page (mirror unreachable, timeout), it switches to the next mirror (if there is one) and re-raises the browser error.
+* If the paper page has no PDF link, or none of the links return a PDF, it returns `{'err': ERROR_MESSAGE}`.
+* For a direct `.pdf` URL, a request error or a non-PDF response returns `{'err': ERROR_MESSAGE}`.
 
 ### download
 
@@ -104,7 +126,7 @@ result = sh.download('http://ieeexplore.ieee.org/xpl/login.jsp?tp=&arnumber=1648
                      destination='papers', path='paper.pdf')
 ```
 
-`download` retries up to 10 times when `fetch` fails, moving to the next mirror each time. If every attempt fails, the last exception is raised. It returns the same dictionary as `fetch`.
+`download` makes up to 3 attempts when `fetch` raises, moving to the next mirror each time if there is one. If every attempt fails, the last exception is raised. It creates `destination` if it doesn't exist, and returns the same dictionary as `fetch`.
 
 ### search
 

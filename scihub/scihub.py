@@ -251,7 +251,7 @@ class SciHub(object):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SciHub - To remove all barriers in the way of science.')
+    parser = argparse.ArgumentParser(prog='scihub', description='SciHub - To remove all barriers in the way of science.')
     parser.add_argument('-d', '--download', metavar='(DOI|PMID|URL)', help='tries to find and download the paper',
                         type=str)
     parser.add_argument('-f', '--file', metavar='path', help='pass file with list of identifiers and download each',
