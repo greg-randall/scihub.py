@@ -2,7 +2,7 @@
 
 """
 Sci-API Unofficial API
-[Search|Download] research papers from [scholar.google.com|sci-hub.io].
+[Search|Download] research papers from [scholar.google.com|sci-hub].
 
 @author zaytoun
 """
@@ -18,6 +18,11 @@ import urllib3
 from bs4 import BeautifulSoup
 from retrying import retry
 
+try:
+    from .browser import BrowserFetcher, BrowserFetchError, CaptchaNeedException
+except ImportError:  # run as a script: python3 scihub/scihub.py
+    from browser import BrowserFetcher, BrowserFetchError, CaptchaNeedException
+
 # log config
 logging.basicConfig()
 logger = logging.getLogger('Sci-Hub')
@@ -29,45 +34,55 @@ urllib3.disable_warnings()
 # constants
 SCHOLARS_BASE_URL = 'https://scholar.google.com/scholar'
 HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:27.0) Gecko/20100101 Firefox/27.0'}
+DEFAULT_MIRRORS = ['https://sci-hub.ru']
+
+
+class OutOfMirrorsError(Exception):
+    pass
+
 
 class SciHub(object):
     """
-    SciHub class can search for papers on Google Scholars 
-    and fetch/download papers from sci-hub.io
+    SciHub class can search for papers on Google Scholars
+    and fetch/download papers from sci-hub.
+
+    Pages on sci-hub are loaded in a Camoufox browser so its robot check can be
+    passed. Call close() when done, or use SciHub as a context manager.
     """
 
-    def __init__(self):
+    def __init__(self, base_urls=None, proxy=None, headless=True, debug_dir=None):
         self.sess = requests.Session()
         self.sess.headers = HEADERS
-        self.available_base_url_list = self._get_available_scihub_urls()
+        self.available_base_url_list = [u.rstrip('/') for u in (base_urls or DEFAULT_MIRRORS)]
         self.base_url = self.available_base_url_list[0] + '/'
+        self.browser = BrowserFetcher(headless=headless, debug_dir=debug_dir)
+        self.set_proxy(proxy)
 
-    def _get_available_scihub_urls(self):
-        '''
-        Finds available scihub urls via https://sci-hub.now.sh/
-        '''
-        urls = []
-        res = requests.get('https://sci-hub.now.sh/')
-        s = self._get_soup(res.content)
-        for a in s.find_all('a', href=True):
-            if 'sci-hub.' in a['href']:
-                urls.append(a['href'])
-        return urls
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        self.browser.close()
 
     def set_proxy(self, proxy):
         '''
-        set proxy for session
-        :param proxy_dict:
+        set proxy for session and browser (must be called before the first fetch
+        for the browser to pick it up)
+        :param proxy: proxy URL like socks5://user:pass@host:port
         :return:
         '''
         if proxy:
             self.sess.proxies = {
                 "http": proxy,
                 "https": proxy, }
+            self.browser.proxy = proxy
 
     def _change_base_url(self):
-        if not self.available_base_url_list:
-            raise Exception('Ran out of valid sci-hub urls')
+        if len(self.available_base_url_list) <= 1:
+            raise OutOfMirrorsError('Ran out of valid sci-hub urls')
         del self.available_base_url_list[0]
         self.base_url = self.available_base_url_list[0] + '/'
         logger.info("I'm changing to {}".format(self.available_base_url_list[0]))
@@ -84,7 +99,7 @@ class SciHub(object):
         while True:
             try:
                 res = self.sess.get(SCHOLARS_BASE_URL, params={'q': query, 'start': start})
-            except requests.exceptions.RequestException as e:
+            except requests.exceptions.RequestException:
                 results['err'] = 'Failed to complete search with query %s (connection error)' % query
                 return results
 
@@ -119,7 +134,8 @@ class SciHub(object):
 
             start += 10
 
-    @retry(wait_random_min=100, wait_random_max=1000, stop_max_attempt_number=10)
+    @retry(wait_random_min=100, wait_random_max=1000, stop_max_attempt_number=3,
+           retry_on_exception=lambda e: not isinstance(e, OutOfMirrorsError))
     def download(self, identifier, destination='', path=None):
         """
         Downloads a paper from sci-hub given an indentifier (DOI, PMID, URL).
@@ -128,7 +144,9 @@ class SciHub(object):
         """
         data = self.fetch(identifier)
 
-        if not 'err' in data:
+        if 'err' not in data:
+            if destination:
+                os.makedirs(destination, exist_ok=True)
             self._save(data['pdf'],
                        os.path.join(destination, path if path else data['name']))
 
@@ -136,70 +154,57 @@ class SciHub(object):
 
     def fetch(self, identifier):
         """
-        Fetches the paper by first retrieving the direct link to the pdf.
-        If the indentifier is a DOI, PMID, or URL pay-wall, then use Sci-Hub
-        to access and download paper. Otherwise, just download paper directly.
+        Fetches the paper. If the identifier is a direct link to a PDF, download it
+        directly. Otherwise (DOI, PMID, or pay-walled URL) load it on sci-hub in the
+        browser and download the PDF from there.
         """
+        if self._classify(identifier) == 'url-direct':
+            return self._fetch_direct(identifier)
 
+        page_url = self.base_url + identifier
         try:
-            url = self._get_direct_url(identifier)
+            pdf, url = self.browser.fetch_pdf(page_url)
+        except CaptchaNeedException:
+            logger.info('Failed to fetch pdf with identifier %s (page %s) due to captcha' % (identifier, page_url))
+            self._try_next_mirror()
+            raise
+        except BrowserFetchError as e:
+            logger.info('Failed to fetch pdf with identifier %s: %s' % (identifier, e))
+            return {'err': 'Failed to fetch pdf with identifier %s: %s' % (identifier, e)}
+        except Exception as e:  # browser/navigation errors, e.g. mirror unreachable
+            logger.info('Browser error on %s (%s: %s)' % (page_url, type(e).__name__, e))
+            self._try_next_mirror()
+            raise
 
-            # verify=False is dangerous but sci-hub.io 
-            # requires intermediate certificates to verify
-            # and requests doesn't know how to download them.
-            # as a hacky fix, you can add them to your store
-            # and verifying would work. will fix this later.
-            res = self.sess.get(url, verify=False)
+        return {
+            'pdf': pdf,
+            'url': url,
+            'name': self._generate_name(url, pdf)
+        }
 
-            if res.headers['Content-Type'] != 'application/pdf':
-                self._change_base_url()
-                logger.info('Failed to fetch pdf with identifier %s '
-                                           '(resolved url %s) due to captcha' % (identifier, url))
-                raise CaptchaNeedException('Failed to fetch pdf with identifier %s '
-                                           '(resolved url %s) due to captcha' % (identifier, url))
-                # return {
-                #     'err': 'Failed to fetch pdf with identifier %s (resolved url %s) due to captcha'
-                #            % (identifier, url)
-                # }
-            else:
-                return {
-                    'pdf': res.content,
-                    'url': url,
-                    'name': self._generate_name(res)
-                }
-
-        except requests.exceptions.ConnectionError:
-            logger.info('Cannot access {}, changing url'.format(self.available_base_url_list[0]))
+    def _try_next_mirror(self):
+        try:
             self._change_base_url()
+        except OutOfMirrorsError:
+            logger.info('No other sci-hub mirror to switch to; retrying %s' % self.base_url)
 
+    def _fetch_direct(self, url):
+        try:
+            # verify=False is dangerous but some hosts serve incomplete
+            # certificate chains that requests can't verify.
+            res = self.sess.get(url, verify=False)
         except requests.exceptions.RequestException as e:
-            logger.info('Failed to fetch pdf with identifier %s (resolved url %s) due to request exception.'
-                       % (identifier, url))
-            return {
-                'err': 'Failed to fetch pdf with identifier %s (resolved url %s) due to request exception.'
-                       % (identifier, url)
-            }
+            logger.info('Failed to fetch pdf from %s due to request exception: %s' % (url, e))
+            return {'err': 'Failed to fetch pdf from %s due to request exception: %s' % (url, e)}
 
-    def _get_direct_url(self, identifier):
-        """
-        Finds the direct source url for a given identifier.
-        """
-        id_type = self._classify(identifier)
-
-        return identifier if id_type == 'url-direct' \
-            else self._search_direct_url(identifier)
-
-    def _search_direct_url(self, identifier):
-        """
-        Sci-Hub embeds papers in an iframe. This function finds the actual
-        source url which looks something like https://moscow.sci-hub.io/.../....pdf.
-        """
-        res = self.sess.get(self.base_url + identifier, verify=False)
-        s = self._get_soup(res.content)
-        iframe = s.find('iframe')
-        if iframe:
-            return iframe.get('src') if not iframe.get('src').startswith('//') \
-                else 'http:' + iframe.get('src')
+        if not res.content.startswith(b'%PDF'):
+            return {'err': 'Failed to fetch pdf from %s (got %s, HTTP %d)'
+                           % (url, res.headers.get('Content-Type'), res.status_code)}
+        return {
+            'pdf': res.content,
+            'url': url,
+            'name': self._generate_name(res.url, res.content)
+        }
 
     def _classify(self, identifier):
         """
@@ -232,23 +237,20 @@ class SciHub(object):
         """
         return BeautifulSoup(html, 'html.parser')
 
-    def _generate_name(self, res):
+    def _generate_name(self, url, content):
         """
-        Generate unique filename for paper. Returns a name by calcuating 
+        Generate unique filename for paper. Returns a name by calcuating
         md5 hash of file contents, then appending the last 20 characters
         of the url which typically provides a good paper identifier.
         """
-        name = res.url.split('/')[-1]
+        name = url.split('/')[-1]
         name = re.sub('#view=(.+)', '', name)
-        pdf_hash = hashlib.md5(res.content).hexdigest()
+        name = re.sub(r'[\\/:*?"<>|]', '_', name)
+        pdf_hash = hashlib.md5(content).hexdigest()
         return '%s-%s' % (pdf_hash, name[-20:])
 
-class CaptchaNeedException(Exception):
-    pass
 
 def main():
-    sh = SciHub()
-
     parser = argparse.ArgumentParser(description='SciHub - To remove all barriers in the way of science.')
     parser.add_argument('-d', '--download', metavar='(DOI|PMID|URL)', help='tries to find and download the paper',
                         type=str)
@@ -262,14 +264,23 @@ def main():
     parser.add_argument('-o', '--output', metavar='path', help='directory to store papers', default='', type=str)
     parser.add_argument('-v', '--verbose', help='increase output verbosity', action='store_true')
     parser.add_argument('-p', '--proxy', help='via proxy format like socks5://user:pass@host:port', action='store', type=str)
+    parser.add_argument('-m', '--mirror', metavar='URL', action='append',
+                        help='sci-hub mirror to use; repeat to give fallbacks (default: %s)' % DEFAULT_MIRRORS[0])
+    parser.add_argument('--show-browser', action='store_true', help='show the browser window instead of running headless')
+    parser.add_argument('--debug-dir', metavar='path', default=os.path.join('data', 'debug'),
+                        help='where to save page HTML when a download fails (default: %(default)s)')
 
     args = parser.parse_args()
 
     if args.verbose:
         logger.setLevel(logging.DEBUG)
-    if args.proxy:
-        sh.set_proxy(args.proxy)
 
+    with SciHub(base_urls=args.mirror, proxy=args.proxy, headless=not args.show_browser,
+                debug_dir=args.debug_dir) as sh:
+        run(sh, args)
+
+
+def run(sh, args):
     if args.download:
         result = sh.download(args.download, args.output)
         if 'err' in result:
@@ -298,7 +309,8 @@ def main():
     elif args.file:
         with open(args.file, 'r') as f:
             identifiers = f.read().splitlines()
-            for identifier in identifiers:
+            for i, identifier in enumerate(identifiers, 1):
+                logger.info('[%d/%d] %s', i, len(identifiers), identifier)
                 result = sh.download(identifier, args.output)
                 if 'err' in result:
                     logger.debug('%s', result['err'])
